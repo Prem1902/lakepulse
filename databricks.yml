@@ -1,0 +1,100 @@
+bundle:
+  name: lakepulse_scd2_engine
+
+variables:
+  catalog:
+    description: "Unity Catalog name per environment"
+    default: "dev_fin_catalog"
+  api_url:
+    description: "Source FinTech REST API endpoint"
+    default: "SIMULATE"
+
+resources:
+  jobs:
+    customer_scd2_pipeline:
+      name: "[${bundle.target}] LakePulse Customer SCD2 Pipeline"
+      job_clusters:
+        - job_cluster_key: "scd2_ephemeral_cluster"
+          new_cluster:
+            spark_version: "15.4.x-scala2.12"
+            node_type_id: "i3.xlarge"
+            data_security_mode: "SINGLE_USER"
+            runtime_engine: "PHOTON"
+            autoscale:
+              min_workers: 1
+              max_workers: 4
+            spark_conf:
+              "bundle.catalog": "${var.catalog}"
+              "bundle.api_url": "${var.api_url}"
+              "spark.databricks.delta.optimizeWrite.enabled": "true"
+
+      tasks:
+        - task_key: "t1_api_to_volume"
+          job_cluster_key: "scd2_ephemeral_cluster"
+          spark_python_task:
+            python_file: "src/tasks/t1_api_to_volume.py"
+
+        - task_key: "t2_volume_to_bronze"
+          depends_on:
+            - task_key: "t1_api_to_volume"
+          job_cluster_key: "scd2_ephemeral_cluster"
+          spark_python_task:
+            python_file: "src/tasks/t2_volume_to_bronze.py"
+
+        - task_key: "t3_bronze_to_silver"
+          depends_on:
+            - task_key: "t2_volume_to_bronze"
+          job_cluster_key: "scd2_ephemeral_cluster"
+          spark_python_task:
+            python_file: "src/tasks/t3_bronze_to_silver.py"
+
+targets:
+  dev:
+    mode: development
+    default: true
+    variables:
+      catalog: "dev_fin_catalog"
+      api_url: "SIMULATE"
+    resources:
+      jobs:
+        customer_scd2_pipeline:
+          job_clusters:
+            - job_cluster_key: "scd2_ephemeral_cluster"
+              new_cluster:
+                num_workers: 0
+                runtime_engine: "STANDARD"
+                spark_conf:
+                  "spark.master": "local[*, 4]"
+                  "spark.databricks.cluster.profile": "singleNode"
+                custom_tags:
+                  "ResourceClass": "SingleNode"
+                  "Environment": "DEV"
+
+  prod:
+    mode: production
+    variables:
+      catalog: "prod_fin_catalog"
+      api_url: "https://api.internal-fintech.com"
+    run_as:
+      service_principal_name: "sp-prod-data-eng-runner"
+    resources:
+      jobs:
+        customer_scd2_pipeline:
+          schedule:
+            quartz_cron_expression: "0 0 * * * ?"
+            timezone_id: "UTC"
+            pause_status: "UNPAUSED"
+          job_clusters:
+            - job_cluster_key: "scd2_ephemeral_cluster"
+              new_cluster:
+                node_type_id: "r6id.2xlarge"
+                runtime_engine: "PHOTON"
+                autoscale:
+                  min_workers: 2
+                  max_workers: 8
+                aws_attributes:
+                  first_on_demand: 1
+                  availability: "SPOT_WITH_FALLBACK"
+                custom_tags:
+                  "Environment": "PROD"
+                  "CostCenter": "DataPlatform"
